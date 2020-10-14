@@ -5,7 +5,7 @@ Dockerfile parser module
 from argparse import ArgumentParser
 from base64 import b64encode
 from bz2 import compress
-from os.path import dirname, join
+from os.path import dirname, isabs, join
 from sys import stdin
 import json
 import re
@@ -38,54 +38,74 @@ def compress_and_b64(file, basepath=None):
     return '\n'.join([cat, b64.decode(), '__EOFF__']) + '\n'
 
 
-def parse_instruction(inst, dfile=None):
-    """
-    Method for translating Dockerfile instructions to shell script
-    """
-    ins = inst['instruction'].upper()
-    val = inst['value']
+class DockerParser:
+    def __init__(self):
+        self.workdir = None
 
-    # Valid Dockerfile instructions
-    cmds = ['ADD', 'ARG', 'CMD', 'COPY', 'ENTRYPOINT', 'ENV', 'EXPOSE', 'FROM',
-            'HEALTHCHECK', 'LABEL', 'MAINTAINER', 'ONBUILD', 'RUN', 'SHELL',
-            'STOPSIGNAL', 'USER', 'VOLUME', 'WORKDIR']
+    def get_cd_cmd(self):
+        cd_cmd =''
+        if self.workdir is not None:
+            cd_cmd = 'cd %s && ' % self.workdir
+        return cd_cmd
 
-    if ins == 'ADD':
-        val = val.replace('$', '\\$')
-        args = val.split(' ')
-        return 'wget -O %s %s\n' % (args[1], args[0])
 
-    if ins == 'ARG':
-        return '%s\n' % val
+    def parse_instruction(self, inst, dfile=None):
+        """
+        Method for translating Dockerfile instructions to shell script
+        """
+        ins = inst['instruction'].upper()
+        val = inst['value']
 
-    if ins == 'ENV':
-        if '=' not in val:
-            val = val.replace(' ', '=', 1)
-        val = val.replace('$', '\\$')
-        return 'export %s\n' % val
+        # Valid Dockerfile instructions
+        cmds = ['ADD', 'ARG', 'CMD', 'COPY', 'ENTRYPOINT', 'ENV', 'EXPOSE', 'FROM',
+                'HEALTHCHECK', 'LABEL', 'MAINTAINER', 'ONBUILD', 'RUN', 'SHELL',
+                'STOPSIGNAL', 'USER', 'VOLUME', 'WORKDIR']
 
-    if ins == 'RUN':
-        # Replace `` with $()
-        while '`' in val:
-            val = val.replace('`', '"$(', 1)
-            val = val.replace('`', ')"', 1)
-        return '%s\n' % val.replace('$', '\\$')
+        if ins == 'ADD':
+            val = val.replace('$', '\\$')
+            args = val.split(' ')
+            return 'wget -O %s %s\n' % (args[1], args[0])
 
-    if ins == 'WORKDIR':
-        return 'mkdir -p %s && cd %s\n' % (val, val)
+        if ins == 'ARG':
+            return '%s\n' % val
 
-    if ins == 'COPY':
-        if '/' in dfile:
-            return compress_and_b64(val, basepath=dirname(dfile))
-        return compress_and_b64(val)
+        if ins == 'ENV':
+            if '=' not in val:
+                val = val.replace(' ', '=', 1)
+            val = val.replace('$', '\\$')
+            return 'export %s\n' % val
 
-    if ins in cmds:
-        # TODO: Look at CMD being added to /etc/rc.local
-        return '#\n# %s not implemented\n# Instruction: %s %s\n#\n' % \
-            (ins, ins, val)
+        if ins == 'RUN':
+            # Replace `` with $()
+            while '`' in val:
+                val = val.replace('`', '"$(', 1)
+                val = val.replace('`', ')"', 1)
+            cd_cmd = self.get_cd_cmd()
+            return '%s%s\n' % (cd_cmd, val.replace('$', '\\$'))
 
-    # Silently ignore unknown instructions
-    return ''
+        if ins == 'WORKDIR':
+            if self.workdir is None:
+                if not isabs(val):
+                    exit(1)
+                self.workdir = val
+            elif isabs(val):
+                self.workdir = val
+            else:
+                self.workdir = join(self.workdir, val)
+            return 'mkdir -p %s && cd %s\n' % (self.workdir, self.workdir)
+
+        if ins == 'COPY':
+            if '/' in dfile:
+                return compress_and_b64(val, basepath=dirname(dfile))
+            return compress_and_b64(val)
+
+        if ins in cmds:
+            # TODO: Look at CMD being added to /etc/rc.local
+            return '#\n# %s not implemented\n# Instruction: %s %s\n#\n' % \
+                (ins, ins, val)
+
+        # Silently ignore unknown instructions
+        return ''
 
 
 def main():
@@ -145,10 +165,11 @@ def main():
         print(json.dumps(instructions))
         return
 
+    parser = DockerParser()
     # Default to shell script output
     script = '#!/bin/sh\n'
     for i in instructions:
-        script += parse_instruction(i, dfile=args.Dockerfile)
+        script += parser.parse_instruction(i, dfile=args.Dockerfile)
     print(script)
 
 
